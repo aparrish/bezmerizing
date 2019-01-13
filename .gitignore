@@ -50,3 +50,4 @@ docs/_build
 # project-specific
 *.png
 *.swp
+.ipynb_checkpoints/

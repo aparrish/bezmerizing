@@ -122,7 +122,6 @@ class Bezier:
         :param thicknesses: list of "thickness" (distance from curve)
         :returns: list of [x, y] coordinates
         """
-        assert type(bez) is Bezier
         inner = self.offsets([i*-0.5 for i in thicknesses])
         outer = list(reversed(self.offsets([i*0.5 for i in thicknesses])))
         return inner + outer
@@ -244,7 +243,6 @@ def fancy_curve(vertices, thicknesses, tightness=0.0, samples_per=6,
     :param interp: scipy interpolation kind
     :returns: list of [x, y] points (polygon)
     """
-    vertices = [vertices[0]] + vertices + [vertices[-1]]
     beziers = beziers_from_catmull(vertices, tightness)
     polygon = beziers_tangent_offset_polygon(beziers, thicknesses, samples_per,
             interp)
