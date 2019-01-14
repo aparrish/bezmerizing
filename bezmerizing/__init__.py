@@ -4,7 +4,7 @@ from scipy import interpolate
 
 __author__ = 'Allison Parrish'
 __email__ = 'allison@decontextualize.com'
-__version__ = '0.0.1'
+__version__ = '0.0.2'
 
 class Bezier:
     """A class to represent Bezier curves.
@@ -170,6 +170,18 @@ def beziers_flat_commands(beziers):
         commands.extend(bez.flat_commands())
     return commands
 
+def smooth_point_path(vertices, tightness=0.0):
+    """List of flat commands for Catmull Bezier path from points.
+
+    Convenience function to return the flat path commands for a Catmull-Rom
+    curve going through the specified points.
+
+    :param vertices: list of [x, y] points
+    :param tightness: tightness of curve
+    :returns: list of flat commands
+    """
+    return beziers_flat_commands(beziers_from_catmull(vertices, tightness))
+
 def resample(src, needed_len, kind):
     x = np.linspace(0, len(src), len(src))
     y = np.array(src, dtype=np.float32)
@@ -199,8 +211,8 @@ def beziers_tangent_offsets(beziers, distances, samples_per=6, interp='linear'):
     if len(distances) != needed_pts:
         distances = resample(distances, needed_pts, interp)
     offset_pts = beziers[0].offsets(distances[:samples_per])
-    for i, bez in enumerate(beziers):
-        this_offset = bez.offsets(distances[i*samples_per:(i+1)*samples_per])
+    for i, bez in enumerate(beziers[1:]):
+        this_offset = bez.offsets(distances[(i+1)*samples_per:(i+2)*samples_per])
         offset_pts.extend(this_offset)
     return offset_pts
 
@@ -257,10 +269,9 @@ if __name__ == '__main__':
     from random import randrange
     from flat import document, rgba, shape
     width, height = (500, 500)
-    n_pts = 10 
-    pts = [[randrange(width), randrange(height)] for i in range(n_pts)]
+    pts = [[100,100], [100,100], [100,400], [400,400], [400,100], [400,100]]
     bez = beziers_from_catmull(pts)
-    poly = fancy_curve(pts, [0, 3, 4, 10, 4, 3, 0], samples_per=24,
+    poly = fancy_curve(pts, [1, 10, 50, 25, 20, 15, 10], samples_per=24,
             interp='cubic')
     bg_shape = shape().nostroke().fill(rgba(255, 255, 255, 255))
     pts_shape = shape().stroke(rgba(255, 0, 0, 240)).width(2)
@@ -270,7 +281,7 @@ if __name__ == '__main__':
     page = doc.addpage()
     page.place(bg_shape.rectangle(0, 0, width, height))
     page.place(poly_shape.polygon(flatten(poly)))
-    page.place(catmull_shape.path(beziers_flat_commands(bez)))
+    page.place(catmull_shape.path(smooth_point_path(pts)))
     page.place(pts_shape.polyline(flatten(pts)))
     page.image(kind='rgba').png('test.png')
 
