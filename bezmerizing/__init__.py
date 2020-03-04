@@ -4,7 +4,7 @@ from scipy import interpolate
 
 __author__ = 'Allison Parrish'
 __email__ = 'allison@decontextualize.com'
-__version__ = '0.0.2'
+__version__ = '0.0.3'
 
 class Bezier:
     """A class to represent Bezier curves.
