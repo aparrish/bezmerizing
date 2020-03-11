@@ -274,6 +274,19 @@ class Polyline:
     def reverse(self):
         return Polyline(np.flipud(self.vertices))
 
+    def augment(self):
+        """Returns this Polyline with its first and last items repeated
+
+        This is helpful as a brute-force method for calculating a spline from
+        pre-existing data where you want the spline to run through the first
+        and last points, which are otherwise "eaten" by the algorithm.
+        """
+        poly = Polyline(np.concatenate([
+            [self.vertices[0]],
+            self.vertices,
+            [self.vertices[-1]]]))
+        return poly
+
     def catmull_spline(self, tightness=0.0):
         """Smooth this polyline into a Bezier spline using Catmull-Rom.
 
