@@ -8,14 +8,69 @@ __author__ = 'Allison Parrish'
 __email__ = 'allison@decontextualize.com'
 __version__ = '0.1.0'
 
-class Bezier:
-    """A class to represent Bezier curves.
+class BaseBezier:
+    """Base class for Bezier curves."""
+
+    def __init__(self):
+        raise NotImplemented
+
+    def point(self):
+        raise NotImplemented
+
+    def tangent(self):
+        raise NotImplemented
+
+    def to_path(self):
+        raise NotImplemented
+
+    def offsets(self, distances):
+        """Get a Polyline of [x,y] points offset from curve normals.
+
+        Calculates and returns a list of points offset from the normals of the
+        curve. The second parameter should be a list with offset distances; the
+        length of this list will determine the "resolution" at which the curve
+        is sampled.
+
+        :param distances: list of distances
+        :returns: list of [x,y] coordinates
+        """
+        segs = len(distances) - 1
+        tangents = [self.tangent(i/segs) for i in range(segs+1)]
+        pts = [self.point(i/segs) for i in range(segs+1)]
+        offset_pts = []
+        for i, (x, y) in enumerate(tangents):
+            theta = math.atan2(y, x) + (math.pi * 0.5)
+            newx_in = pts[i][0] + math.cos(theta) * distances[i]
+            newy_in = pts[i][1] + math.sin(theta) * distances[i]
+            offset_pts.append([newx_in, newy_in])
+        return Polyline(offset_pts)
+
+    def offset_polygon(self, thicknesses):
+        """Get a Polyline of points offset from normals on both sides.
+
+        Calculates and returns a list of points offset from the normals of the
+        curve, forming a polygon "around" the curve. The "thickness" of the
+        polygon at evenly sampled points along the curve are given as the
+        second parameter.  (The length of this list determines the resolution
+        of curve sampling.)
+
+        :param thicknesses: list of "thickness" (distance from curve)
+        :returns: Polyline
+        """
+        inner = self.offsets([i*-0.5 for i in thicknesses])
+        outer = self.offsets([i*0.5 for i in thicknesses]).reverse()
+        return inner + outer
+
+class Bezier(BaseBezier):
+
+    """A class to represent (cubic) Bezier curves.
 
     :param start: [x, y] of curve start
     :param cp1: [x, y] of first control point
     :param cp2: [x, y] of second control point
     :param end: [x, y] of curve end
     """
+
     def __init__(self, start, cp1, cp2, end):
         self.start = start
         self.cp1 = cp1
@@ -90,43 +145,63 @@ class Bezier:
                                     self.end[1]))
         return Path(cmds)
 
-    def offsets(self, distances):
-        """Get a Polyline of [x,y] points offset from curve normals.
 
-        Calculates and returns a list of points offset from the normals of the
-        curve. The second parameter should be a list with offset distances; the
-        length of this list will determine the "resolution" at which the curve
-        is sampled.
+class QuadraticBezier(BaseBezier):
 
-        :param distances: list of distances
-        :returns: list of [x,y] coordinates
+    """A class to represent quadratic Bezier curves.
+
+    :param start: [x, y] of curve start
+    :param cp1: [x, y] of control point
+    :param end: [x, y] of curve end
+    """
+
+    def __init__(self, start, cp1, end):
+        self.start = start
+        self.cp1 = cp1
+        self.end = end
+
+    def point(self, t):
+        """Get coordinates of point at the given position on the curve.
+
+        :param t: position on the curve (should be between 0 and 1)
+        :returns: [x, y] of coordinates at position
         """
-        segs = len(distances) - 1
-        tangents = [self.tangent(i/segs) for i in range(segs+1)]
-        pts = [self.point(i/segs) for i in range(segs+1)]
-        offset_pts = []
-        for i, (x, y) in enumerate(tangents):
-            theta = math.atan2(y, x) + (math.pi * 0.5)
-            newx_in = pts[i][0] + math.cos(theta) * distances[i]
-            newy_in = pts[i][1] + math.sin(theta) * distances[i]
-            offset_pts.append([newx_in, newy_in])
-        return Polyline(offset_pts)
+        adjusted = 1 - t
+        x = (
+            pow(adjusted, 2) * self.start[0] + 
+            2 * adjusted * t * self.cp1[0] +
+            pow(t, 2) * self.end[0]
+        )
+        y = (
+            pow(adjusted, 2) * self.start[1] + 
+            2 * adjusted * t * self.cp1[1] +
+            pow(t, 2) * self.end[1]
+        )
+        return [x, y]
 
-    def offset_polygon(self, thicknesses):
-        """Get a Polyline of points offset from normals on both sides.
+    def tangent(self, t):
+        a = (1 - t) * 2
+        b = t * 2
+        x = (
+            (a * (self.cp1[0] - self.start[0])) + 
+            (b * (self.end[0] - self.cp1[0]))
+        )
+        y = (
+            (a + (self.cp1[1] - self.start[1])) +
+            (b * (self.end[1] - self.cp1[1]))
+        )
+        return [x, y]
 
-        Calculates and returns a list of points offset from the normals of the
-        curve, forming a polygon "around" the curve. The "thickness" of the
-        polygon at evenly sampled points along the curve are given as the
-        second parameter.  (The length of this list determines the resolution
-        of curve sampling.)
-
-        :param thicknesses: list of "thickness" (distance from curve)
-        :returns: Polyline
-        """
-        inner = self.offsets([i*-0.5 for i in thicknesses])
-        outer = self.offsets([i*0.5 for i in thicknesses]).reverse()
-        return inner + outer
+    def to_path(self, moveto=True):
+        from flat import command
+        cmds = []
+        if moveto:
+            cmds.append(command.moveto(self.start[0], self.start[1]))
+        cmds.append(command.quadto(self.cp1[0],
+                                   self.cp1[1],
+                                   self.end[0],
+                                   self.end[1]))
+        return Path(cmds)
 
 
 class Spline:
