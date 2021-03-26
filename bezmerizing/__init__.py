@@ -321,17 +321,14 @@ class Path:
                 [copy(c).transform(np.cos(theta), -np.sin(theta),
                     np.sin(theta), np.cos(theta), 0, 0) for c in self.commands])
 
-    def flatten(self, samples_per=6):
-        "flattens the path to a polyline"
-        pass
-
-    def to_list(self):
-        "returns a list of Bezmerizing objects representing the path"
+    def to_lists(self):
+        "returns a list of lists of Bezmerizing objects representing path parts"
         cx = 0
         cy = 0
-        objs = []
+        parts = []
         openx = 0
         openy = 0
+        objs = []
         for item in self.commands:
             if isinstance(item, command.moveto):
                 openx = item.x
@@ -355,26 +352,31 @@ class Path:
                 objs.append(Polyline([[cx, cy], [openx, openy]]))
                 openx = cx
                 openy = cy
+                parts.append(objs)
+                objs = []
                 continue
             cx = item.x
             cy = item.y
-        return objs
+        return parts
 
-    def to_polyline(self, samples_per=6, resample_polylines=False):
+    def to_polyline_list(self, samples_per=6, resample_polylines=False):
         "converts this path to a polyline by sampling each constituent element"
-        objs = self.to_list()
-        pts = []
-        for item in objs:
-            if isinstance(item, BaseBezier):
-                pts.extend(item.to_polyline(samples_per))
-            elif isinstance(item, Polyline):
-                if resample_polylines:
-                    pts.extend(item.resample(samples_per).vertices.tolist())
+        parts = self.to_lists()
+        plines = []
+        for part in parts:
+            pts = []
+            for item in part:
+                if isinstance(item, BaseBezier):
+                    pts.extend(item.to_polyline(samples_per))
+                elif isinstance(item, Polyline):
+                    if resample_polylines:
+                        pts.extend(item.resample(samples_per).vertices.tolist())
+                    else:
+                        pts.extend(item.vertices.tolist())
                 else:
-                    pts.extend(item.vertices.tolist())
-            else:
-                raise ValueError("unknown path type")
-        return Polyline(pts)
+                    raise ValueError("unknown path type")
+            plines.append(Polyline(pts))
+        return PolylineList(plines)
 
     def __add__(self, other):
         return Path(self.commands + other.commands)
@@ -523,6 +525,23 @@ class Polyline:
             pts.extend(newl)
         return Polyline(pts)
 
+    def to_path(self, close=False):
+        """Get flat commands to draw the polyline.
+
+        Convenience function to return path commands for use with the flat
+        library.
+
+        :returns: list of flat commands
+        """
+
+        from flat import command
+        cmds = [command.moveto(*self.vertices[0])]
+        for vert in self.vertices[1:]:
+            cmds.append(command.lineto(*vert))
+        if close:
+            cmds.append(command.closepath)
+        return Path(cmds)
+
     def __iter__(self):
         return iter(self.vertices.flatten())
 
@@ -539,6 +558,36 @@ class Polyline:
         return "Polyline([{0}])".format(
                 ', '.join(["[%0.4f, %0.4f]" % tuple(item)
                     for item in self.vertices.tolist()]))
+
+
+class PolylineList:
+
+    def __init__(self, plines):
+        self.plines = plines
+
+    def to_path(self, close=True):
+        cmds = []
+        for poly in self.plines:
+            cmds.extend(poly.to_path(close=close))
+        return Path(cmds)
+
+    def scale(self, x):
+        return self.scalexy(x, x)
+
+    def scalexy(self, x, y):
+        return PolylineList([p.scalexy(x, y) for p in self.plines])
+
+    def translate(self, x, y):
+        return PolylineList([p.translate(x, y) for p in self.plines])
+
+    def rotate(self, theta):
+        return PolylineList([p.rotate(theta) for p in self.plines])
+
+    def map(self, func):
+        return PolylineList([func(p) for p in self.plines])
+
+    def __getitem__(self, i):
+        return self.plines[i]
 
 
 def resample(src, needed_len, kind):
