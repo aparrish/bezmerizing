@@ -6,7 +6,7 @@ from flat import command
 
 __author__ = 'Allison Parrish'
 __email__ = 'allison@decontextualize.com'
-__version__ = '0.1.0'
+__version__ = '0.1.1'
 
 class BaseBezier:
     """Base class for Bezier curves."""
@@ -60,6 +60,13 @@ class BaseBezier:
         inner = self.offsets([i*-0.5 for i in thicknesses])
         outer = self.offsets([i*0.5 for i in thicknesses]).reverse()
         return inner + outer
+
+    def to_polyline(self, samples_per=6):
+        "returns a polyline generated from samples of the curve"
+        pts = []
+        for i in np.linspace(0, 1, samples_per):
+            pts.append(self.point(i))
+        return pts
 
 class Bezier(BaseBezier):
 
@@ -145,6 +152,12 @@ class Bezier(BaseBezier):
                                     self.end[1]))
         return Path(cmds)
 
+    def __repr__(self):
+        formatted = {k: "[%0.4f, %0.4f]" % tuple(getattr(self, k)) for k in
+            ['start', 'cp1', 'cp2', 'end']}
+        return ("Bezier(start={start}, cp1={cp1}, cp2={cp2}, end={end})"
+                .format(**formatted))
+
 
 class QuadraticBezier(BaseBezier):
 
@@ -202,6 +215,12 @@ class QuadraticBezier(BaseBezier):
                                    self.end[0],
                                    self.end[1]))
         return Path(cmds)
+
+    def __repr__(self):
+        formatted = {k: "[%0.4f, %0.4f]" % tuple(getattr(self, k)) for k in
+            ['start', 'cp1', 'end']}
+        return ("QuadraticBezier(start={start}, cp1={cp1}, end={end})"
+                .format(**formatted))
 
 
 class Spline:
@@ -301,6 +320,61 @@ class Path:
         return Path(
                 [copy(c).transform(np.cos(theta), -np.sin(theta),
                     np.sin(theta), np.cos(theta), 0, 0) for c in self.commands])
+
+    def flatten(self, samples_per=6):
+        "flattens the path to a polyline"
+        pass
+
+    def to_list(self):
+        "returns a list of Bezmerizing objects representing the path"
+        cx = 0
+        cy = 0
+        objs = []
+        openx = 0
+        openy = 0
+        for item in self.commands:
+            if isinstance(item, command.moveto):
+                openx = item.x
+                openy = item.y
+                cx = item.x
+                cy = item.y
+            if isinstance(item, command.lineto):
+                objs.append(Polyline([[cx, cy], [item.x, item.y]]))
+            elif isinstance(item, command.curveto):
+                objs.append(
+                    Bezier([cx, cy],
+                        [item.x1, item.y1],
+                        [item.x2, item.y2],
+                        [item.x, item.y]))
+            elif isinstance(item, command.quadto):
+                objs.append(
+                    QuadraticBezier([cx, cy],
+                        [item.x1, item.y1],
+                        [item.x, item.y]))
+            elif isinstance(item, command.closepath.__class__):
+                objs.append(Polyline([[cx, cy], [openx, openy]]))
+                openx = cx
+                openy = cy
+                continue
+            cx = item.x
+            cy = item.y
+        return objs
+
+    def to_polyline(self, samples_per=6, resample_polylines=False):
+        "converts this path to a polyline by sampling each constituent element"
+        objs = self.to_list()
+        pts = []
+        for item in objs:
+            if isinstance(item, BaseBezier):
+                pts.extend(item.to_polyline(samples_per))
+            elif isinstance(item, Polyline):
+                if resample_polylines:
+                    pts.extend(item.resample(samples_per).vertices.tolist())
+                else:
+                    pts.extend(item.vertices.tolist())
+            else:
+                raise ValueError("unknown path type")
+        return Polyline(pts)
 
     def __add__(self, other):
         return Path(self.commands + other.commands)
@@ -428,6 +502,26 @@ class Polyline:
         polygon = bez_spline.tangent_offset_polygon(thicknesses, samples_per,
                 interp)
         return polygon
+
+    def resample(self, samples_per=6):
+        """'Resamples' a polyline
+
+        Returns a new polyline with each constituent line of the original
+        replaced with a new polyline having the specified number of points
+        along the original line."""
+        pts = []
+        for i in range(len(self.vertices) - 1):
+            if i == len(self.vertices) - 2:
+                incl_end = True
+            else:
+                incl_end = False
+            newl = np.linspace(
+                self.vertices[i],
+                self.vertices[i+1],
+                num=samples_per,
+                endpoint=incl_end).tolist()
+            pts.extend(newl)
+        return Polyline(pts)
 
     def __iter__(self):
         return iter(self.vertices.flatten())

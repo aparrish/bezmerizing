@@ -13,7 +13,7 @@ setup(
     long_description=readme,
     long_description_content_type="text/markdown",
     packages=setuptools.find_packages(),
-    install_requires=['flat>=0.0.3', 'scipy>=1.1.0'],
+    install_requires=['flat>=0.0.3', 'scipy>=1.1.0', 'numpy>=1.16.0'],
     dependency_links=[],
     classifiers=[
         'Programming Language :: Python :: 3',
