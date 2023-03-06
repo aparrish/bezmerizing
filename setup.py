@@ -5,7 +5,7 @@ with open('README.md') as readme_file:
 
 setup(
     name='bezmerizing',
-    version='0.1.1',
+    version='0.1.2',
     author='Allison Parrish',
     author_email='allison@decontextualize.com',
     url='https://github.com/aparrish/bezmerizing',
