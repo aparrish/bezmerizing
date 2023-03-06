@@ -6,7 +6,7 @@ from flat import command
 
 __author__ = 'Allison Parrish'
 __email__ = 'allison@decontextualize.com'
-__version__ = '0.1.1'
+__version__ = '0.1.2'
 
 class BaseBezier:
     """Base class for Bezier curves."""
@@ -238,6 +238,10 @@ class Spline:
         for bez in self.beziers:
             commands.extend(bez.to_path())
         return Path(commands)
+
+    def to_polyline(self, samples_per=6):
+        "Flatten spline to a single polyline by sampling each component curve"
+        return flatten([s.to_polyline(samples_per) for s in self.beziers])
 
     def tangent_offsets(self, distances, samples_per=6, interp='linear'):
         """Get a Polyline of [x,y] points offset from bezier curves in spline.
