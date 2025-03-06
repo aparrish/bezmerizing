@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bezmerizing"
+version = "0.2.0"
+dependencies = [
+    'scipy>=1.1.0',
+    'numpy>=1.16.0'
+]
+authors = [
+    {name="Allison Parrish", email="allison@decontextualize.com"}
+]
+description = "tiny quirky library with some bezier curve functions"
+readme = "README.md"
+license = { text = "LicenseRef-Anti-Capitalist-1.4" }
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python"
+]
+keywords = ["2d", "bezier", "geometry", "vector"]
+
+[project.urls]
+Homepage = "https://github.com/aparrish/bezmerizing"
+
