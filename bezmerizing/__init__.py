@@ -1,12 +1,13 @@
-import math
 import numpy as np
 from copy import copy
-from scipy import interpolate
-from flat import command
+
+from bezmerizing.offsetting import (calculate_offsets,
+                                    calculate_spline_offsets,
+                                    trim_cusps)
 
 __author__ = 'Allison Parrish'
 __email__ = 'allison@decontextualize.com'
-__version__ = '0.1.2'
+__version__ = '0.2.0'
 
 class BaseBezier:
     """Base class for Bezier curves."""
@@ -14,16 +15,71 @@ class BaseBezier:
     def __init__(self):
         raise NotImplemented
 
-    def point(self):
+    def to_svg_path(self):
         raise NotImplemented
 
-    def tangent(self):
+    def point(self, t):
         raise NotImplemented
 
-    def to_path(self):
+    def split(self, t):
         raise NotImplemented
 
-    def offsets(self, distances):
+    def control_point_distance(self):
+        raise NotImplemented
+
+    def deriv(self):
+        raise NotImplemented
+
+    def slice(self, t1, t2):
+        "returns a new Bezier, sliced between t1 and t2 from this Bezier"
+        first, second = self.split(t1)
+        # pretty sure this is right lmao
+        slice_, leftover = second.split((t2-t1)/(1-t1))
+        return slice_
+
+    def kappa(self, t):
+        "curvature of the Bezier at time t"
+        d = self.deriv().point(t)
+        p = self.deriv().deriv().point(t)
+        return ((d[0]*p[1]) - (p[0]*d[1])) / pow(d[0]**2 + d[1]**2, 3/2)
+
+    def tangent(self, t):
+        """Get vector of tangent at the given position on the curve.
+
+        :param t: position on the curve (should be between 0 and 1)
+        :returns: [x, y] vector of tangent at position
+        """
+        return self.deriv().point(t)
+
+    def tangent_unit(self, t):
+        "unit vector from tangent at time t"
+        vec = np.array(self.tangent(t))
+        hat = vec / np.linalg.norm(vec)
+        return hat
+
+    def normal(self, t):
+        "normal vector at time t"
+        vec = np.array(self.tangent(t))
+        return np.array([vec[1], vec[0] * -1])
+
+    def normal_unit(self, t):
+        "unit vector from normal at time t"
+        vec = self.normal(t)
+        return vec / np.linalg.norm(vec)
+
+    def flatness(self):
+        """a simple measurement of "flatness"
+
+        The ratio of the curve's start/end line segment to the max distance
+        of the control point to that segment."""
+
+        start_end_length = np.linalg.norm(
+            np.array([self.start[0], self.start[1]]) -
+            np.array([self.end[0], self.end[1]]))
+        return self.control_point_distance() / start_end_length
+
+    def offsets(self, distances, trim=True, subdivide=True, threshold=0.1,
+                depth=0, max_depth=5):
         """Get a Polyline of [x,y] points offset from curve normals.
 
         Calculates and returns a list of points offset from the normals of the
@@ -32,18 +88,22 @@ class BaseBezier:
         is sampled.
 
         :param distances: list of distances
-        :returns: list of [x,y] coordinates
+        :param trim: if True, attempts to trim cusps
+        :param subdivide: if True, subdivides insufficiently "flat" segments
+        :param threshold: threshold for subdivision (between 0 and 1)
+        :param depth: current recursion depth (set to 0)
+        :param max_depth: recursion limit
+        :returns: Polyline of [x,y] coordinates
         """
-        segs = len(distances) - 1
-        tangents = [self.tangent(i/segs) for i in range(segs+1)]
-        pts = [self.point(i/segs) for i in range(segs+1)]
-        offset_pts = []
-        for i, (x, y) in enumerate(tangents):
-            theta = math.atan2(y, x) + (math.pi * 0.5)
-            newx_in = pts[i][0] + math.cos(theta) * distances[i]
-            newy_in = pts[i][1] + math.sin(theta) * distances[i]
-            offset_pts.append([newx_in, newy_in])
-        return Polyline(offset_pts)
+
+        offset_pts, sign_change_idx = calculate_offsets(
+                curve=self, distances=distances, subdivide=subdivide,
+                threshold=threshold, depth=depth, max_depth=max_depth)
+
+        if trim and len(sign_change_idx) > 1:
+            return trim_cusps(Polyline(offset_pts), sign_change_idx)
+        else:
+            return Polyline(offset_pts)
 
     def offset_polygon(self, thicknesses):
         """Get a Polyline of points offset from normals on both sides.
@@ -66,7 +126,8 @@ class BaseBezier:
         pts = []
         for i in np.linspace(0, 1, samples_per):
             pts.append(self.point(i))
-        return pts
+        return Polyline(pts)
+
 
 class Bezier(BaseBezier):
 
@@ -83,6 +144,93 @@ class Bezier(BaseBezier):
         self.cp1 = cp1
         self.cp2 = cp2
         self.end = end
+
+    def to_svg_path(self, close=False):
+        return " ".join([
+            f"M {self.start[0]},{self.start[1]}",
+            f"C {self.cp1[0]},{self.cp1[1]}",
+            f"{self.cp2[0]},{self.cp2[1]}",
+            f"{self.end[0]},{self.end[1]}"]) + (" Z" if close else "")
+
+    def split(self, t):
+        "splits the curve at time t, returning the resulting two curves"
+
+        p4 = [lerp(self.start[0], self.cp1[0], t),
+              lerp(self.start[1], self.cp1[1], t)]
+        p5 = [lerp(self.cp1[0], self.cp2[0], t),
+              lerp(self.cp1[1], self.cp2[1], t)]
+        p6 = [lerp(self.cp2[0], self.end[0], t),
+              lerp(self.cp2[1], self.end[1], t)]
+        p7 = [lerp(p4[0], p5[0], t),
+              lerp(p4[1], p5[1], t)]
+        p8 = [lerp(p5[0], p6[0], t),
+              lerp(p5[1], p6[1], t)]
+        p9 = [lerp(p7[0], p8[0], t),
+              lerp(p7[1], p8[1], t)]
+
+        return (Bezier(start=self.start, cp1=p4, cp2=p7, end=p9),
+                Bezier(start=p9, cp1=p8, cp2=p6, end=self.end))
+
+    def control_point_distance(self):
+        "max distance of the control points to start/end"
+        c1 = np.array(self.cp1)
+        c2 = np.array(self.cp2)
+        start = np.array(self.start)
+        end = np.array(self.end)
+        c1_dist_sq = ((np.linalg.norm(c1-start)**2) - 
+                      (np.dot(c1-start, end-start)**2) / np.dot(end-start,
+                                                               end-start))
+        c2_dist_sq = ((np.linalg.norm(c2-start)**2) -
+                      (np.dot(c2-start, end-start)**2) / np.dot(end-start,
+                                                                end-start))
+        return np.sqrt(max(c1_dist_sq, c2_dist_sq))
+
+    def deriv(self):
+        "returns derivative of the curve"
+        return QuadraticBezier(
+                start=[
+                    (self.cp1[0] - self.start[0]) * 3,
+                    (self.cp1[1] - self.start[1]) * 3
+                ],
+                cp1=[
+                    (self.cp2[0] - self.cp1[0]) * 3,
+                    (self.cp2[1] - self.cp1[1]) * 3
+                ],
+                end=[
+                    (self.end[0] - self.cp2[0]) * 3,
+                    (self.end[1] - self.cp2[1]) * 3
+                ]
+            )
+
+    def inflections(self):
+        "inflection points of this curve"
+
+        x0 = self.start[0]
+        x1 = self.cp1[0]
+        x2 = self.cp2[0]
+        x3 = self.end[0]
+        y0 = self.start[1]
+        y1 = self.cp1[1]
+        y2 = self.cp2[1]
+        y3 = self.end[1]
+
+        ax = -x0 + 3*x1 - 3*x2 + x3
+        bx = 3*x0 - 6*x1 + 3*x2
+        cx = -3*x0 + 3*x1
+        dx = x0
+
+        ay = -y0 + 3*y1 - 3*y2 + y3
+        by = 3*y0 - 6*y1 + 3*y2
+        cy = -3*y0 + 3*y1
+        dy = y0
+
+        cusp_t = -0.5 * ((ay*cx - ax*cy) / (ay*bx - ax*by))
+        t1 = cusp_t - np.sqrt(
+                pow(cusp_t, 2) - (1/3)*((by*cx - bx*cy) / (ay*bx - ax*by)))
+        t2 = cusp_t + np.sqrt(
+                pow(cusp_t, 2) - (1/3)*((by*cx - bx*cy) / (ay*bx - ax*by)))
+
+        return [t1, t2]
 
     def point(self, t):
         """Get coordinates of point at the given position on the curve.
@@ -105,53 +253,6 @@ class Bezier(BaseBezier):
         )
         return [x, y]
 
-    def tangent(self, t):
-        """Get vector of tangent at the given position on the curve.
-
-        :param t: position on the curve (should be between 0 and 1)
-        :returns: [x, y] vector of tangent at position
-        """
-        adjusted = 1 - t
-        x = (
-            3 * self.end[0] * pow(t, 2) -
-            3 * self.cp2[0] * pow(t, 2) +
-            6 * self.cp2[0] * adjusted * t -
-            6 * self.cp1[0] * adjusted * t +
-            3 * self.cp1[0] * pow(adjusted, 2) -
-            3 * self.start[0] * pow(adjusted, 2)
-        )
-        y = (
-            3 * self.end[1] * pow(t, 2) -
-            3 * self.cp2[1] * pow(t, 2) +
-            6 * self.cp2[1] * adjusted * t -
-            6 * self.cp1[1] * adjusted * t +
-            3 * self.cp1[1] * pow(adjusted, 2) -
-            3 * self.start[1] * pow(adjusted, 2)
-        )
-        return [x, y]
-
-    def to_path(self, moveto=True):
-        """Get flat commands to draw the curve.
-
-        Convenience function to return path commands for use with the flat
-        library.
-
-        :param moveto: if True (default), include "moveto" to curve start
-        :returns: list of flat commands
-        """
-
-        from flat import command
-        cmds = []
-        if moveto:
-            cmds.append(command.moveto(self.start[0], self.start[1]))
-        cmds.append(command.curveto(self.cp1[0],
-                                    self.cp1[1],
-                                    self.cp2[0],
-                                    self.cp2[1],
-                                    self.end[0],
-                                    self.end[1]))
-        return Path(cmds)
-
     def __repr__(self):
         formatted = {k: "[%0.4f, %0.4f]" % tuple(getattr(self, k)) for k in
             ['start', 'cp1', 'cp2', 'end']}
@@ -173,6 +274,40 @@ class QuadraticBezier(BaseBezier):
         self.cp1 = cp1
         self.end = end
 
+    def to_svg_path(self, close=False):
+        return " ".join([
+            f"M {self.start[0]},{self.start[1]}",
+            f"Q {self.cp1[0]},{self.cp1[1]}",
+            f"{self.end[0]},{self.end[1]}"]) + (" Z" if close else "")
+
+    def control_point_distance(self):
+        "max distance of the control points to start/end"
+        c1 = np.array(self.cp1)
+        start = np.array(self.start)
+        end = np.array(self.end)
+        c1_dist_sq = ((np.linalg.norm(c1-start)**2) - 
+                      (np.dot(c1-start, end-start)**2) / np.dot(end-start,
+                                                               end-start))
+        return np.sqrt(c1_dist_sq)
+
+    def split(self, t):
+        "splits the curve at time t, returning the resulting two curves"
+        p4 = [lerp(self.start[0], self.cp1[0], t),
+              lerp(self.start[1], self.cp1[1], t)]
+        p5 = [lerp(self.cp1[0], self.end[0], t),
+              lerp(self.cp1[1], self.end[1], t)]
+        mid = [lerp(p4[0], p5[0], t), lerp(p4[1], p5[1], t)]
+        return (QuadraticBezier(self.start, p4, mid),
+                QuadraticBezier(mid, p5, self.end))
+
+    def deriv(self):
+        "derivative of the curve (a line segment)"
+        return LineSegment(
+            start=[(self.cp1[0] - self.start[0]) * 2,
+                   (self.cp1[1] - self.start[1]) * 2],
+            end=[(self.end[0] - self.cp1[0]) * 2,
+                 (self.end[1] - self.cp1[1]) * 2])
+
     def point(self, t):
         """Get coordinates of point at the given position on the curve.
 
@@ -192,35 +327,78 @@ class QuadraticBezier(BaseBezier):
         )
         return [x, y]
 
-    def tangent(self, t):
-        a = (1 - t) * 2
-        b = t * 2
-        x = (
-            (a * (self.cp1[0] - self.start[0])) + 
-            (b * (self.end[0] - self.cp1[0]))
-        )
-        y = (
-            (a + (self.cp1[1] - self.start[1])) +
-            (b * (self.end[1] - self.cp1[1]))
-        )
-        return [x, y]
-
-    def to_path(self, moveto=True):
-        from flat import command
-        cmds = []
-        if moveto:
-            cmds.append(command.moveto(self.start[0], self.start[1]))
-        cmds.append(command.quadto(self.cp1[0],
-                                   self.cp1[1],
-                                   self.end[0],
-                                   self.end[1]))
-        return Path(cmds)
+    def to_cubic_bezier(self):
+        "elevate curve order to cubic"
+        return Bezier(
+                start=self.start,
+                cp1=[self.start[0]*(1/3) + self.cp1[0]*(2/3),
+                     self.start[1]*(1/3) + self.cp1[1]*(2/3)],
+                cp2=[self.cp1[0]*(2/3) + self.end[0]*(1/3),
+                     self.cp1[1]*(2/3) + self.end[1]*(1/3)],
+                end=self.end)
 
     def __repr__(self):
         formatted = {k: "[%0.4f, %0.4f]" % tuple(getattr(self, k)) for k in
             ['start', 'cp1', 'end']}
         return ("QuadraticBezier(start={start}, cp1={cp1}, end={end})"
                 .format(**formatted))
+
+class LineSegment:
+    """A class to represent line segments, primarily as the derivative of
+    a quadratic Bezier curve."""
+
+    def __init__(self, start, end):
+        self.start = start
+        self.end = end
+
+    def point(self, t):
+        return [self.start[0] + (self.end[0] - self.start[0]) * t,
+                self.start[1] + (self.end[1] - self.start[1]) * t]
+
+    def deriv(self):
+        # this is a cheat! I don't want to overcomplicate the Bezier
+        # kappa method by checking for constants vs. objects with .point()
+        # methods, and I don't need a Point class. so we represent
+        # the derivative of a LineSegment as a LineSegment whose start and
+        # end points are the same.
+        pt = [self.end[0] - self.start[0], self.end[1] - self.start[1]]
+        return LineSegment(start=pt, end=pt)
+
+    def to_svg_path(self, close=False):
+        return (f"M {self.start[0]},{self.start[1]} " 
+                + f"L {self.end[0]},{self.end[1]}"
+                + (" Z" if close else ""))
+
+    def to_polyline(self):
+        return Polyline([self.start, self.end])
+
+    def intersection(self, other):
+        "returns intersection of this line segment with another"
+        
+        x1 = self.start[0]
+        y1 = self.start[1]
+        x2 = self.end[0]
+        y2 = self.end[1]
+        
+        x3 = other.start[0]
+        y3 = other.start[1]
+        x4 = other.end[0]
+        y4 = other.end[1]
+
+        d = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        if d == 0:
+            return np.nan
+        t = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / d
+        u = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1-x3)) / d
+
+        if not((0 <= t <= 1) and (0 <= u <= 1)) or d == 0:
+            return np.nan
+        else:
+            return self.point(t)
+
+    def __repr__(self):
+        return "LineSegment(start=[{0}, {1}], end=[{2}, {3}])".format(
+                self.start[0], self.start[1], self.end[0], self.end[1])
 
 
 class Spline:
@@ -229,178 +407,55 @@ class Spline:
     def __init__(self, beziers):
         self.beziers = beziers
 
-    def to_path(self):
-        """Get a list of flat commands for this spline's bezier curves.
-
-        :returns: Path object
-        """
-        commands = []
-        for bez in self.beziers:
-            commands.extend(bez.to_path())
-        return Path(commands)
-
     def to_polyline(self, samples_per=6):
         "Flatten spline to a single polyline by sampling each component curve"
-        return flatten([s.to_polyline(samples_per) for s in self.beziers])
+        return Polyline(
+                flatten([s.to_polyline(samples_per) for s in self.beziers]))
 
-    def tangent_offsets(self, distances, samples_per=6, interp='linear'):
+    def to_svg_path(self, close=False):
+        return " ".join([s.to_svg_path(close) for s in self.beziers])
+
+    def offsets(self, distances, samples_per=6, trim=True, subdivide=True,
+                threshold=0.1, depth=0, max_depth=5):
         """Get a Polyline of [x,y] points offset from bezier curves in spline.
 
         Calculates and returns a list of points offset from the normals of all
         curves in the given list at the given distances. Each curve is sampled
         the specified number of times, evenly spaced along the curve. If the
         length of the distances list is not the product of the number of
-        beziers and the number of samples per curve, it will be resampled with
-        scipy's interp1d function using the specified interpolation (default
-        "linear"; also try "nearest", "quadratic", "cubic"). 
+        beziers and the number of samples per curve, it will be resampled
+        to the needed length.
 
         :param distances: list of offset distances
         :param samples_per: number of evenly-spaced samples per curve
-        :param interp: scipy interpolation kind
-        :returns: list of [x, y] points (polyline)
+        :param trim: if True, attempts to trim cusps
+        :param subdivide: if True, subdivides insufficiently "flat" segments
+        :param threshold: threshold for subdivision (between 0 and 1)
+        :param depth: current recursion depth (set to 0)
+        :param max_depth: recursion limit
+        :returns: Polyline of [x,y] coordinates
         """
-        needed_pts = len(self.beziers) * samples_per
-        if len(distances) != needed_pts:
-            distances = resample(distances, needed_pts, interp)
-        offset_pts = self.beziers[0].offsets(distances[:samples_per])
-        for i, bez in enumerate(self.beziers[1:]):
-            this_offset = bez.offsets(
-                    distances[(i+1)*samples_per:(i+2)*samples_per])
-            offset_pts += this_offset
-        return offset_pts
 
-    def tangent_offset_polygon(self, thicknesses, samples_per=6,
-        interp='linear'):
-        """Get a polygon (list of [x, y] points) offset from normals of spline.
+        return calculate_spline_offsets(self, distances, samples_per,
+                                        trim, subdivide, threshold, depth,
+                                        max_depth)
+
+    def offset_polygon(self, thicknesses, samples_per=6):
+        """Get a polygon offset from normals of spline.
 
         Calculates polygon with symmetrical distances (given as a list in the
         second parameter).  The "thicknesses" list will be interpolated to the
-        needed length using the specified interpolation method.
+        needed length.
 
         :param thicknesses: list of offset distances
         :param samples_per: number of evenly-spaced samples per curve
-        :param interp: scipy interpolation kind
         :returns: list of [x, y] coordinates
         """
-        inner = self.tangent_offsets(
-                [i*-0.5 for i in thicknesses], samples_per, interp)
-        outer = self.tangent_offsets(
-                [i*0.5 for i in thicknesses], samples_per, interp)
+        inner = self.offsets(
+                [i*-0.5 for i in thicknesses], samples_per)
+        outer = self.offsets(
+                [i*0.5 for i in thicknesses], samples_per)
         return inner + outer.reverse()
-
-
-class Path:
-    """Represents a path as a series of Flat commands."""
-
-    def __init__(self, commands):
-        self.commands = commands
-
-    @classmethod
-    def frompoints(cls, points, close=False):
-        "creates a Path from a list of 2d lists, e.g. [[0,1],[3,4],[5,6]...]"
-        commands = [command.moveto(*points[0])]
-        for pt in points[1:]:
-            commands.append(command.lineto(*pt))
-        if close:
-            commands.append(command.closepath)
-        return cls(commands)
-
-    def scale(self, x):
-        "scales the path by the same factor along both axes"
-        return self.scalexy(x, x)
-
-    def scalexy(self, x, y):
-        "scales the path by the given values on the x and y axes"
-        return Path(
-            [copy(cmd).transform(x, 0, 0, y, 0, 0) for cmd in self.commands])
-
-    def translate(self, x, y):
-        "translates (moves) the path by x and y units in the respective axes"
-        return Path(
-            [copy(cmd).transform(1, 0, 0, 1, x, y) for cmd in self.commands])
-
-    def rotate(self, theta):
-        "rotates the path around the origin with the given angle (in radians)"
-        return Path(
-                [copy(c).transform(np.cos(theta), -np.sin(theta),
-                    np.sin(theta), np.cos(theta), 0, 0) for c in self.commands])
-
-    def to_lists(self):
-        "returns a list of lists of Bezmerizing objects representing path parts"
-        cx = 0
-        cy = 0
-        parts = []
-        openx = 0
-        openy = 0
-        objs = []
-        for item in self.commands:
-            if isinstance(item, command.moveto):
-                openx = item.x
-                openy = item.y
-                cx = item.x
-                cy = item.y
-            if isinstance(item, command.lineto):
-                objs.append(Polyline([[cx, cy], [item.x, item.y]]))
-            elif isinstance(item, command.curveto):
-                objs.append(
-                    Bezier([cx, cy],
-                        [item.x1, item.y1],
-                        [item.x2, item.y2],
-                        [item.x, item.y]))
-            elif isinstance(item, command.quadto):
-                objs.append(
-                    QuadraticBezier([cx, cy],
-                        [item.x1, item.y1],
-                        [item.x, item.y]))
-            elif isinstance(item, command.closepath.__class__):
-                objs.append(Polyline([[cx, cy], [openx, openy]]))
-                openx = cx
-                openy = cy
-                parts.append(objs)
-                objs = []
-                continue
-            cx = item.x
-            cy = item.y
-        return parts
-
-    def to_polyline_list(self, samples_per=6, resample_polylines=False):
-        "converts this path to a polyline by sampling each constituent element"
-        parts = self.to_lists()
-        plines = []
-        for part in parts:
-            pts = []
-            for item in part:
-                if isinstance(item, BaseBezier):
-                    pts.extend(item.to_polyline(samples_per))
-                elif isinstance(item, Polyline):
-                    if resample_polylines:
-                        pts.extend(item.resample(samples_per).vertices.tolist())
-                    else:
-                        pts.extend(item.vertices.tolist())
-                else:
-                    raise ValueError("unknown path type")
-            plines.append(Polyline(pts))
-        return PolylineList(plines)
-
-    def __add__(self, other):
-        return Path(self.commands + other.commands)
-
-    def __iter__(self):
-        return iter(self.commands)
-
-    def __repr__(self):
-        return "Path([{0}])".format(
-                ", ".join([command_repr(cmd) for cmd in self.commands]))
-
-
-def command_repr(cmd):
-    "Returns a reasonable string representation of a Flat command."
-    if isinstance(cmd, command.closepath.__class__):
-        return "closepath"
-    class_name = type(cmd).__name__
-    s = ", ".join(["{k}={v:0.4f}".format(k=slot, v=getattr(cmd, slot))
-        for slot in cmd.__slots__])
-    return class_name + "(" + s + ")"
 
 
 class Polyline:
@@ -411,6 +466,12 @@ class Polyline:
         self.vertices = np.array(vertices)
         if self.vertices.shape[1] != 2:
             raise ValueError("2d data only, sorry")
+
+    def to_svg_path(self, close=False):
+        return (
+            f"M {self.vertices[0][0]},{self.vertices[0][1]} " 
+            + " ".join([f"L {item[0]},{item[1]}" for item in self.vertices])
+            + (" Z" if close else ""))
 
     def scale(self, x):
         return self.scalexy(x, x)
@@ -445,10 +506,10 @@ class Polyline:
     def catmull_spline(self, tightness=0.0):
         """Smooth this polyline into a Bezier spline using Catmull-Rom.
 
-        Applies the Catmull-Rom splines algorithm to get a list of Bezier curves
-        passing through the given vertices. The tightness parameter controls the
-        "tightness" of the curves (1.0 results in straight lines, 0.0 is the
-        default).
+        Applies the Catmull-Rom splines algorithm to get a list of Bezier
+        curves passing through the given vertices. The tightness parameter
+        controls the "tightness" of the curves (1.0 results in straight
+        lines, 0.0 is the default).
 
         :param vertices: list of [x, y] points (polyline) to smooth
         :param tightness: "tightness" of resulting curves (default 0.0)
@@ -476,37 +537,22 @@ class Polyline:
             beziers.append(Bezier(b[0], b[1], b[2], b[3]))
         return Spline(beziers)
 
-    def smooth_path(self, tightness=0.0):
-        """Path object for Catmull Bezier spline from this polyline's points.
-
-        Convenience function to return the flat path commands for a Catmull-Rom
-        curve going through the specified points.
-
-        :param tightness: tightness of curve
-        :returns: list of flat commands
-        """
-        return Path(self.catmull_spline(tightness).to_path())
-
-    def fancy_curve(self, thicknesses, tightness=0.0, samples_per=6,
-            interp='linear'):
-        """Get a polygon surrounding a Catmull-Rom curve produced from vertices.
+    def fancy_curve(self, thicknesses, tightness=0.0, samples_per=6):
+        """Get the polygon of a Catmull-Rom curve produced from vertices.
 
         Returns the polygon formed from a Catmull-Rom spline through this
         polyline's points, with the polygon's thickness determined by values
         in the firstparameter. (The first item of the list is the thickness of
         the polygon at the start of the curve; the last item of the list is the
         thickness of the polygon at the end of the curve.) The "thicknesses"
-        list will be interpolated to the needed length using the specified
-        interpolation method.
+        list will be interpolated to the needed length.
 
         :param thicknesses: list of offset distances
         :param tightness: tightness of Catmull-Rom curve
-        :param interp: scipy interpolation kind
         :returns: list of [x, y] points (polygon)
         """
         bez_spline = self.catmull_spline(tightness)
-        polygon = bez_spline.tangent_offset_polygon(thicknesses, samples_per,
-                interp)
+        polygon = bez_spline.offset_polygon(thicknesses, samples_per)
         return polygon
 
     def resample(self, samples_per=6):
@@ -529,31 +575,65 @@ class Polyline:
             pts.extend(newl)
         return Polyline(pts)
 
-    def to_path(self, close=False):
-        """Get flat commands to draw the polyline.
+    def area_signed(self):
+        "calculates the signed area of the polygon"
+        x = self.vertices[:,0]
+        y = self.vertices[:,1]
+        area = 0.5 * (np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+        return area
 
-        Convenience function to return path commands for use with the flat
-        library.
+    def area(self):
+        "convenience function that gets the absolute value of the area"
+        return np.abs(self.area_signed())
 
-        :returns: list of flat commands
+    def is_clockwise(self):
+        "true if the polyline's points are in clockwise order"
+        return bool(self.area_signed() < 0)
+
+    def is_counterclockwise(self):
+        "true if the polyline's points are all widdershins"
+        return bool(self.area_signed() > 0)
+
+    def intersections(self, other, first_only=False):
+        """Calculates the intersections between this polyline and another.
+
+        The return value is a tuple whose first element is a list, where
+        each element of the list whose first item is the index of the
+        intersecting segment in this polyline, and whose second item is
+        the index of the intersecting segment in the other polyline.
+        The second element of the return tuple is a list of [x, y] points
+        where the intersections occurred, which corresponds index-wise
+        with the list in the first element of the tuple.
+
+        :param other: a PolyLine object
+        :param first_only: if True, returns after finding one intersection
+        :returns: tuple of lists: (indices, coordinates)
         """
 
-        from flat import command
-        cmds = [command.moveto(*self.vertices[0])]
-        for vert in self.vertices[1:]:
-            cmds.append(command.lineto(*vert))
-        if close:
-            cmds.append(command.closepath)
-        return Path(cmds)
+        intersection_idx = []
+        intersection_pts = []
 
-    def __iter__(self):
-        return iter(self.vertices.flatten())
+        # yes this is O(n^2). but short of an rtree I don't know if there's
+        # really any low hanging fruit for optimization that is worthwhile?
+        for i, (my_pt1, my_pt2) in enumerate(zip(self.vertices[:-1],
+                                                 self.vertices[1:])):
+            my_seg = LineSegment(my_pt1, my_pt2)
+            for j, (their_pt1, their_pt2) in enumerate(
+                    zip(other.vertices[:-1], other.vertices[1:])):
+                their_seg = LineSegment(their_pt1, their_pt2)
+                intersection = my_seg.intersection(their_seg)
+                if intersection is not np.nan:
+                    intersection_idx.append([i, j])
+                    intersection_pts.append(intersection)
+                    if first_only: break
+
+        return (intersection_idx, intersection_pts)
 
     def __getitem__(self, i):
-        return self.vertices[int(i/2),i%2]
+        return self.vertices[i]
 
     def __len__(self):
-        return self.vertices.shape[0] * self.vertices.shape[1]
+        return len(self.vertices)
 
     def __add__(self, other):
         return Polyline(np.concatenate([self.vertices, other.vertices]))
@@ -569,11 +649,8 @@ class PolylineList:
     def __init__(self, plines):
         self.plines = plines
 
-    def to_path(self, close=True):
-        cmds = []
-        for poly in self.plines:
-            cmds.extend(poly.to_path(close=close))
-        return Path(cmds)
+    def to_svg_path(self, close=False):
+        return " ".join([item.to_svg_path(close) for item in self.plines])
 
     def scale(self, x):
         return self.scalexy(x, x)
@@ -594,39 +671,12 @@ class PolylineList:
         return self.plines[i]
 
 
-def resample(src, needed_len, kind):
-    x = np.linspace(0, len(src), len(src))
-    y = np.array(src, dtype=np.float32)
-    newx = np.linspace(0, x.shape[0], needed_len)
-    terp = interpolate.interp1d(x, y, kind=kind)
-    newy = terp(newx)
-    return newy
-
-
 def flatten(t):
-    "Convenience function to flatten lists of pts to format required for flat"
+    "Convenience function to flatten lists of 2d points"
     from itertools import chain
     return list(chain(*t))
 
 
-if __name__ == '__main__':
-    from random import randrange
-    from flat import document, rgba, shape
-    width, height = (500, 500)
-    pts = [[100,100], [100,100], [100,400], [400,400], [400,100], [400,100]]
-    pts_poly = Polyline(pts)
-    bez_spline = pts_poly.catmull_spline()
-    poly = pts_poly.fancy_curve([1, 10, 50, 25, 20, 15, 10], samples_per=24,
-            interp='cubic')
-    bg_shape = shape().nostroke().fill(rgba(255, 255, 255, 255))
-    pts_shape = shape().stroke(rgba(255, 0, 0, 240)).width(2)
-    catmull_shape = shape().stroke(rgba(0, 255, 0, 240)).width(2)
-    poly_shape = shape().stroke(rgba(64, 64, 64, 255)).fill(rgba(0, 0, 0, 220)).width(4)
-    doc = document(width, height, 'mm')
-    page = doc.addpage()
-    page.place(bg_shape.rectangle(0, 0, width, height))
-    page.place(poly_shape.polygon(poly))
-    page.place(catmull_shape.path(pts_poly.smooth_path()))
-    page.place(pts_shape.polyline(pts_poly))
-    page.image(kind='rgba').png('test.png')
-
+def lerp(a, b, t):
+    "good ol' lerp"
+    return (a * (1 - t)) + (b * t)
